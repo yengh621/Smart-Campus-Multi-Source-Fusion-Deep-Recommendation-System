@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Models and Checkpoints
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.pb
+
+# Data outputs
+result/
+logs/
+*.log
+cache/
+aligned_output/
+
+# MOOCCubeX raw data (large files exceeding GitHub limit)
+MOOCCubeX/MOOCCubeX-main/entities/*.json
+MOOCCubeX/MOOCCubeX-main/relations/*.json
+MOOCCubeX/MOOCCubeX-main/prerequisites/*.json
+
+# Teddy data
+dd0f7-main/
+
+# Processed output
+my_output/
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+
+# Environment
+.env
+.env.local
+.env.*.local
