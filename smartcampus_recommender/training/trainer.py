@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import random
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -51,6 +52,98 @@ class Trainer:
         self.task_label_confidence = torch.ones(3, device=self.device)
         self.gradient_conflict = torch.zeros(3, device=self.device)
         self.previous_validation_ce = None
+
+    def _training_state(self, epoch, best, stale, mode, warmup_epochs):
+        state = {
+            "format_version": 1,
+            "model_state": self.model.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict(),
+            "scaler_state": self.scaler.state_dict(),
+            "config": self.config.to_dict(),
+            "epoch": epoch,
+            "best_mean_ndcg10": best,
+            "stale_epochs": stale,
+            "mode": mode,
+            "warmup_epochs": warmup_epochs,
+            "history": self.history,
+            "popularity_ready": self.popularity_ready,
+            "task_label_confidence": self.task_label_confidence.detach().cpu(),
+            "gradient_conflict": self.gradient_conflict.detach().cpu(),
+            "previous_validation_ce": (
+                None if self.previous_validation_ce is None
+                else self.previous_validation_ce.detach().cpu()
+            ),
+            "python_rng_state": random.getstate(),
+            "numpy_rng_state": np.random.get_state(),
+            "torch_rng_state": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+        return state
+
+    @staticmethod
+    def _atomic_save(state, path):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        torch.save(state, temporary)
+        temporary.replace(path)
+
+    def _resolve_resume_path(self, resume_from):
+        path = Path(resume_from)
+        return path if path.is_absolute() else self.config.output_path / path
+
+    def _load_training_state(self, resume_from, expected_mode, warmup_epochs):
+        path = self._resolve_resume_path(resume_from)
+        if not path.is_file():
+            raise FileNotFoundError(f"训练断点不存在：{path}")
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        required = {"model_state", "optimizer_state", "scheduler_state", "epoch"}
+        missing = sorted(required.difference(state))
+        if missing:
+            raise ValueError(
+                f"{path} 不是可续训断点，缺少字段：{', '.join(missing)}。"
+                "旧版 best_model.pth 只能推理，不能恢复优化器状态。"
+            )
+        saved_mode = state.get("mode", expected_mode)
+        if saved_mode != expected_mode:
+            raise ValueError(f"断点训练模式为 {saved_mode!r}，当前模式为 {expected_mode!r}")
+        saved_warmup = state.get("warmup_epochs", warmup_epochs)
+        if saved_warmup != warmup_epochs:
+            raise ValueError(
+                f"断点预热轮数为 {saved_warmup}，当前配置计算为 {warmup_epochs}；"
+                "请保持总 epochs/预热配置一致。"
+            )
+        self.model.load_state_dict(state["model_state"])
+        self.optimizer.load_state_dict(state["optimizer_state"])
+        self.scheduler.load_state_dict(state["scheduler_state"])
+        if "scaler_state" in state:
+            self.scaler.load_state_dict(state["scaler_state"])
+        self.history = list(state.get("history", []))
+        self.popularity_ready = bool(state.get("popularity_ready", True))
+        self.task_label_confidence = state.get(
+            "task_label_confidence", self.task_label_confidence).to(self.device)
+        self.gradient_conflict = state.get(
+            "gradient_conflict", self.gradient_conflict).to(self.device)
+        previous_ce = state.get("previous_validation_ce")
+        self.previous_validation_ce = None if previous_ce is None else previous_ce.to(self.device)
+        if "python_rng_state" in state:
+            random.setstate(state["python_rng_state"])
+        if "numpy_rng_state" in state:
+            np.random.set_state(state["numpy_rng_state"])
+        if "torch_rng_state" in state:
+            torch.set_rng_state(state["torch_rng_state"].cpu())
+        if torch.cuda.is_available() and "cuda_rng_state_all" in state:
+            torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
+        start_epoch = int(state["epoch"]) + 1
+        best = float(state.get("best_mean_ndcg10", -1.0))
+        stale = int(state.get("stale_epochs", 0))
+        self.logger.info(
+            "恢复训练断点：%s | 已完成 epoch %d | best mean_NDCG@10 %.4f | stale %d",
+            path, start_epoch - 1, best, stale,
+        )
+        return start_epoch, best, stale
 
     def autocast(self):
         return torch.autocast(device_type=self.device.type, dtype=torch.float16,

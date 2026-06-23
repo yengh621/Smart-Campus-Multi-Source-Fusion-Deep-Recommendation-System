@@ -30,6 +30,11 @@ def parse_args():
     parser.add_argument("--output-root", default=".")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--resume", nargs="?", const="last_checkpoint.pth", default=None,
+        metavar="CHECKPOINT",
+        help="从训练断点继续；不指定路径时使用 OUTPUT_ROOT/last_checkpoint.pth",
+    )
     parser.add_argument("--force-preprocess", action="store_true")
     parser.add_argument("--quick", action="store_true", help="小样本1轮端到端冒烟测试")
     parser.add_argument("--skip-ablations", action="store_true", help="仅调试时使用；正式论文实验不要跳过")
@@ -95,7 +100,7 @@ def main():
 
     model = SmartCampusRecommender(artifacts, config)
     trainer = Trainer(model, artifacts, config, logger)
-    history = trainer.fit(loaders["train"], loaders["val"])
+    history = trainer.fit(loaders["train"], loaders["val"], resume_from=args.resume)
     # 测试集在完整模型选择结束后仅评估一次。
     test_with_embeddings = trainer.evaluate(loaders["test"], collect_embeddings=True)
     embeddings = test_with_embeddings.pop("embeddings")
