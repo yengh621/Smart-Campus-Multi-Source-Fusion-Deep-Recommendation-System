@@ -79,3 +79,4 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+intelligent_explanation_agent/config.local.json

@@ -44,6 +44,12 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="max", factor=config.lr_factor, patience=config.lr_patience)
         self.checkpoint = config.output_path / checkpoint_name
+        checkpoint_path = Path(checkpoint_name)
+        if checkpoint_path.name == "best_model.pth":
+            latest_name = "last_checkpoint.pth"
+        else:
+            latest_name = checkpoint_path.name.replace("_best.pth", "_last.pth")
+        self.last_checkpoint = self.checkpoint.with_name(latest_name)
         self.kg = torch.tensor(artifacts.kg_triples, dtype=torch.long) if artifacts.kg_triples else torch.empty((0, 3), dtype=torch.long)
         self.history: list[dict] = []
         self.popularity_ready = False
@@ -443,15 +449,25 @@ class Trainer:
             metrics["embeddings"] = {k: torch.cat(v).numpy() for k, v in embeddings.items()}
         return metrics
 
-    def fit(self, train_loader, val_loader, mode="full", epochs=None):
+    def fit(self, train_loader, val_loader, mode="full", epochs=None, resume_from=None):
         epochs = epochs or self.config.epochs
-        if not self.popularity_ready:
-            self.configure_popularity(train_loader)
-        self.configure_task_confidence(train_loader)
         best, stale = -1.0, 0
         warmup_epochs = min(self.config.representation_warmup_epochs, max(epochs - 1, 0))
         self.freeze_kg_in_joint = warmup_epochs > 0
-        for epoch in range(1, epochs + 1):
+        start_epoch = 1
+        if resume_from:
+            start_epoch, best, stale = self._load_training_state(
+                resume_from, mode, warmup_epochs)
+        if not self.popularity_ready:
+            self.configure_popularity(train_loader)
+        if not resume_from:
+            self.configure_task_confidence(train_loader)
+        if stale >= self.config.early_stopping_patience:
+            self.logger.info("该断点已经满足早停条件，不再继续训练")
+            start_epoch = epochs + 1
+        elif start_epoch > epochs:
+            self.logger.info("断点已完成 %d 轮，目标总轮数为 %d，无需继续训练", start_epoch - 1, epochs)
+        for epoch in range(start_epoch, epochs + 1):
             stage = "representation" if epoch <= warmup_epochs else "joint"
             self.set_training_stage(stage)
             start = time.time()
@@ -476,15 +492,28 @@ class Trainer:
                              self.optimizer.param_groups[0]["lr"])
             if stage == "joint" and ndcg > best + 1e-6:
                 best, stale = ndcg, 0
-                torch.save({"model_state": self.model.state_dict(), "config": self.config.to_dict(),
-                            "epoch": epoch, "best_mean_ndcg10": best}, self.checkpoint)
+                self._atomic_save(
+                    {"model_state": self.model.state_dict(), "config": self.config.to_dict(),
+                     "epoch": epoch, "best_mean_ndcg10": best},
+                    self.checkpoint,
+                )
             elif stage == "joint":
                 stale += 1
                 if stale >= self.config.early_stopping_patience:
+                    self._atomic_save(
+                        self._training_state(epoch, best, stale, mode, warmup_epochs),
+                        self.last_checkpoint,
+                    )
                     self.logger.info("早停：连续 %d 轮验证集未提升", stale)
                     break
             if stage == "joint":
                 self.update_task_weights(val)
+            self._atomic_save(
+                self._training_state(epoch, best, stale, mode, warmup_epochs),
+                self.last_checkpoint,
+            )
+        if not self.checkpoint.is_file():
+            raise FileNotFoundError(f"最佳模型检查点不存在：{self.checkpoint}")
         state = torch.load(self.checkpoint, map_location=self.device, weights_only=False)
         self.model.load_state_dict(state["model_state"])
         return self.history
